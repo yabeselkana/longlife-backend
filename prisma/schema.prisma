@@ -1,0 +1,130 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  MEMBER
+}
+
+enum Status {
+  ACTIVE
+  INACTIVE
+}
+
+enum OrderStatus {
+  PENDING
+  APPROVED
+  SHIPPED
+  CANCELLED
+}
+
+enum CommissionStatus {
+  PENDING
+  PAID
+}
+
+enum InvitationStatus {
+  PENDING
+  USED
+  CANCELLED
+}
+
+enum ExpenseStatus {
+  PENDING
+  PROCESSING
+  PAID
+}
+
+model User {
+  id            String  @id @default(uuid())
+  name          String
+  email         String  @unique
+  password_hash String
+  phone         String?
+  city          String?
+  role          Role    @default(MEMBER)
+  status        Status  @default(ACTIVE)
+  parent_id     String?
+
+  personal_sales Decimal  @default(0.00) @db.Decimal(10, 2)
+  created_at     DateTime @default(now())
+  updated_at     DateTime @updatedAt
+
+  parent   User?  @relation("UserToUser", fields: [parent_id], references: [id])
+  children User[] @relation("UserToUser")
+
+  orders      Order[]
+  commissions Commission[]
+  invitations Invitation[]
+}
+
+model Inventory {
+  sku        String   @id
+  name       String
+  price      Decimal  @db.Decimal(10, 2)
+  cost       Decimal  @db.Decimal(10, 2)
+  stock      Int      @default(0)
+  sold       Int      @default(0)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  orders Order[]
+}
+
+model Order {
+  id           Int         @id @default(autoincrement())
+  member_id    String
+  sku          String
+  qty          Int
+  total_amount Decimal     @db.Decimal(10, 2)
+  status       OrderStatus @default(PENDING)
+  created_at   DateTime    @default(now())
+  updated_at   DateTime    @updatedAt
+
+  member  User      @relation(fields: [member_id], references: [id])
+  product Inventory @relation(fields: [sku], references: [sku])
+
+  commissions Commission[]
+}
+
+model Commission {
+  id               Int              @id @default(autoincrement())
+  member_id        String // Upline receiving bonus
+  related_order_id Int // Order that generated this
+  type             String           @default("Network Bonus")
+  amount           Decimal          @db.Decimal(10, 2)
+  status           CommissionStatus @default(PENDING)
+  created_at       DateTime         @default(now())
+  updated_at       DateTime         @updatedAt
+
+  member User  @relation(fields: [member_id], references: [id])
+  order  Order @relation(fields: [related_order_id], references: [id])
+}
+
+model Invitation {
+  id         Int              @id @default(autoincrement())
+  code       String           @unique
+  parent_id  String // The person who generated the code
+  status     InvitationStatus @default(PENDING)
+  created_at DateTime         @default(now())
+  updated_at DateTime         @updatedAt
+
+  parent User @relation(fields: [parent_id], references: [id])
+}
+
+model Expense {
+  id          Int           @id @default(autoincrement())
+  date        DateTime      @default(now())
+  category    String
+  description String?
+  amount      Decimal       @db.Decimal(10, 2)
+  status      ExpenseStatus @default(PAID)
+  created_at  DateTime      @default(now())
+  updated_at  DateTime      @updatedAt
+}
