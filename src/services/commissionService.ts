@@ -12,7 +12,7 @@ export const generateCommission = async (order_amount: number, current_child_id:
 
     for (let i = 0; i < 3; i++) {
         // Find the parent of the current node
-        const user = await prisma.user.findUnique({
+        const user = await prisma.member.findUnique({
             where: { id: currentId },
             select: { parent_id: true }
         });

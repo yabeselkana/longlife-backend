@@ -7,9 +7,132 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-enum Role {
-  ADMIN
-  MEMBER
+model Admin {
+  id            String   @id @default(uuid())
+  name          String
+  email         String   @unique
+  password_hash String
+  phone         String?
+  city          String?
+  identity_id   String?
+  avatar        String?
+  address       String?
+  country       String?
+  province      String?
+  district      String?
+  sub_district  String?
+  village       String?
+  rw            String?
+  rt            String?
+  occupation    String?
+  bank_name     String?
+  bank_account  String?
+  bank_owner    String?
+  status        Status   @default(ACTIVE)
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+
+  members       Member[]
+  invitations   Invitation[]
+}
+
+model Member {
+  id             String       @id @default(uuid())
+  name           String
+  email          String       @unique
+  password_hash  String
+  phone          String?
+  city           String?
+  identity_id    String?
+  avatar         String?
+  address        String?
+  country        String?
+  province       String?
+  district       String?
+  sub_district   String?
+  village        String?
+  rw             String?
+  rt             String?
+  occupation     String?
+  bank_name      String?
+  bank_account   String?
+  bank_owner     String?
+  status         Status       @default(ACTIVE)
+  admin_id       String       // The admin who registered this member or acts as root
+  parent_id      String?      // Downline parent (for binary tree)
+  personal_sales Decimal      @default(0.00) @db.Decimal(10, 2)
+  created_at     DateTime     @default(now())
+  updated_at     DateTime     @updatedAt
+
+  admin          Admin        @relation(fields: [admin_id], references: [id])
+  parent         Member?      @relation("MemberToMember", fields: [parent_id], references: [id])
+  children       Member[]     @relation("MemberToMember")
+
+  commissions    Commission[]
+  invitations    Invitation[]
+  orders         Order[]
+}
+
+model Inventory {
+  sku        String   @id
+  name       String
+  price      Decimal  @db.Decimal(10, 2)
+  cost       Decimal  @db.Decimal(10, 2)
+  stock      Int      @default(0)
+  sold       Int      @default(0)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+  orders     Order[]
+}
+
+model Order {
+  id           Int          @id @default(autoincrement())
+  member_id    String
+  sku          String
+  qty          Int
+  total_amount Decimal      @db.Decimal(10, 2)
+  status       OrderStatus  @default(PENDING)
+  created_at   DateTime     @default(now())
+  updated_at   DateTime     @updatedAt
+  commissions  Commission[]
+  member       Member       @relation(fields: [member_id], references: [id])
+  product      Inventory    @relation(fields: [sku], references: [sku])
+}
+
+model Commission {
+  id               Int              @id @default(autoincrement())
+  member_id        String
+  related_order_id Int
+  type             String           @default("Network Bonus")
+  amount           Decimal          @db.Decimal(10, 2)
+  status           CommissionStatus @default(PENDING)
+  created_at       DateTime         @default(now())
+  updated_at       DateTime         @updatedAt
+  member           Member           @relation(fields: [member_id], references: [id])
+  order            Order            @relation(fields: [related_order_id], references: [id])
+}
+
+model Invitation {
+  id         Int              @id @default(autoincrement())
+  code       String           @unique
+  parent_id  String?
+  admin_id   String?
+  status     InvitationStatus @default(PENDING)
+  created_at DateTime         @default(now())
+  updated_at DateTime         @updatedAt
+  parent     Member?          @relation(fields: [parent_id], references: [id])
+  admin      Admin?           @relation(fields: [admin_id], references: [id])
+}
+
+model Expense {
+  id          Int           @id @default(autoincrement())
+  date        DateTime      @default(now())
+  category    String
+  description String?
+  amount      Decimal       @db.Decimal(10, 2)
+  status      ExpenseStatus @default(PAID)
+  created_at  DateTime      @default(now())
+  updated_at  DateTime      @updatedAt
 }
 
 enum Status {
@@ -39,92 +162,4 @@ enum ExpenseStatus {
   PENDING
   PROCESSING
   PAID
-}
-
-model User {
-  id            String  @id @default(uuid())
-  name          String
-  email         String  @unique
-  password_hash String
-  phone         String?
-  city          String?
-  role          Role    @default(MEMBER)
-  status        Status  @default(ACTIVE)
-  parent_id     String?
-
-  personal_sales Decimal  @default(0.00) @db.Decimal(10, 2)
-  created_at     DateTime @default(now())
-  updated_at     DateTime @updatedAt
-
-  parent   User?  @relation("UserToUser", fields: [parent_id], references: [id])
-  children User[] @relation("UserToUser")
-
-  orders      Order[]
-  commissions Commission[]
-  invitations Invitation[]
-}
-
-model Inventory {
-  sku        String   @id
-  name       String
-  price      Decimal  @db.Decimal(10, 2)
-  cost       Decimal  @db.Decimal(10, 2)
-  stock      Int      @default(0)
-  sold       Int      @default(0)
-  created_at DateTime @default(now())
-  updated_at DateTime @updatedAt
-
-  orders Order[]
-}
-
-model Order {
-  id           Int         @id @default(autoincrement())
-  member_id    String
-  sku          String
-  qty          Int
-  total_amount Decimal     @db.Decimal(10, 2)
-  status       OrderStatus @default(PENDING)
-  created_at   DateTime    @default(now())
-  updated_at   DateTime    @updatedAt
-
-  member  User      @relation(fields: [member_id], references: [id])
-  product Inventory @relation(fields: [sku], references: [sku])
-
-  commissions Commission[]
-}
-
-model Commission {
-  id               Int              @id @default(autoincrement())
-  member_id        String // Upline receiving bonus
-  related_order_id Int // Order that generated this
-  type             String           @default("Network Bonus")
-  amount           Decimal          @db.Decimal(10, 2)
-  status           CommissionStatus @default(PENDING)
-  created_at       DateTime         @default(now())
-  updated_at       DateTime         @updatedAt
-
-  member User  @relation(fields: [member_id], references: [id])
-  order  Order @relation(fields: [related_order_id], references: [id])
-}
-
-model Invitation {
-  id         Int              @id @default(autoincrement())
-  code       String           @unique
-  parent_id  String // The person who generated the code
-  status     InvitationStatus @default(PENDING)
-  created_at DateTime         @default(now())
-  updated_at DateTime         @updatedAt
-
-  parent User @relation(fields: [parent_id], references: [id])
-}
-
-model Expense {
-  id          Int           @id @default(autoincrement())
-  date        DateTime      @default(now())
-  category    String
-  description String?
-  amount      Decimal       @db.Decimal(10, 2)
-  status      ExpenseStatus @default(PAID)
-  created_at  DateTime      @default(now())
-  updated_at  DateTime      @updatedAt
 }

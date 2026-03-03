@@ -25,7 +25,7 @@ export const getMemberSummary = async (req: AuthRequest, res: Response): Promise
         });
 
         // My Referrals summary
-        const referrals = await prisma.user.findMany({
+        const referrals = await prisma.member.findMany({
             where: { parent_id: memberId },
             select: {
                 id: true,

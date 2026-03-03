@@ -5,76 +5,141 @@ import prisma from '../config/db';
 import { AuthRequest } from '../middlewares/authMiddleware';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'supersecretkey123';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '1d'; // Token member = 1 hari
+const JWT_ADMIN_EXPIRES_IN = process.env.JWT_ADMIN_EXPIRES_IN || '8h'; // Token admin = 8 jam
 
 export const register = async (req: Request, res: Response): Promise<void> => {
     try {
-        const { name, email, password, phone, city, invitation_code } = req.body;
+        const { name, email, password, phone, invitation_code, role } = req.body;
 
-        if (!name || !email || !password || !invitation_code) {
+        if (!name || !email || !password) {
             res.status(400).json({ error: 'Missing required fields' });
             return;
         }
 
-        // Check if email exists
-        const existingUser = await prisma.user.findUnique({ where: { email } });
-        if (existingUser) {
+        // Check if email exists in Admin or Member
+        const existingAdmin = await prisma.admin.findUnique({ where: { email } });
+        const existingMember = await prisma.member.findUnique({ where: { email } });
+        if (existingAdmin || existingMember) {
             res.status(400).json({ error: 'Email already registered' });
             return;
         }
 
-        // Validate Invitation Code
-        const invitation = await prisma.invitation.findUnique({ where: { code: invitation_code } });
+        const userRole = role === 'ADMIN' ? 'ADMIN' : 'MEMBER';
+        let parent_id: string | null = null;
+        let admin_id: string | null = null;
+        const expiresIn = userRole === 'ADMIN' ? JWT_ADMIN_EXPIRES_IN : JWT_EXPIRES_IN;
 
-        if (!invitation) {
-            res.status(400).json({ error: 'Invalid invitation code' });
-            return;
-        }
+        if (userRole === 'MEMBER') {
+            if (!invitation_code) {
+                res.status(400).json({ error: 'Missing invitation_code for member registration' });
+                return;
+            }
 
-        if (invitation.status !== 'PENDING') {
-            res.status(400).json({ error: 'Invitation code has already been used or is cancelled' });
-            return;
-        }
+            const invitation = await prisma.invitation.findUnique({
+                where: { code: invitation_code },
+                include: { parent: true, admin: true }
+            });
 
-        // Hash Password
-        const password_hash = await bcrypt.hash(password, 10);
+            if (!invitation) {
+                res.status(400).json({ error: 'Invalid invitation code' });
+                return;
+            }
 
-        // Create User and Update Invitation in a Transaction
-        const newUser = await prisma.$transaction(async (tx) => {
-            const user = await tx.user.create({
+            if (invitation.status !== 'PENDING') {
+                res.status(400).json({ error: 'Invitation code has already been used or is cancelled' });
+                return;
+            }
+
+            parent_id = invitation.parent_id;
+            // Admin ID is inherited from the parent if a parent exists, otherwise directly from the Admin who created the invitation
+            admin_id = invitation.parent ? invitation.parent.admin_id : (invitation.admin_id || null);
+
+            if (!admin_id) {
+                res.status(400).json({ error: 'Invitation does not have a valid admin association' });
+                return;
+            }
+
+            // BINARY TREE LOGIC: Max 2 downlines per sponsor
+            // Note: If parent_id is null, it means it's a root node directly under an admin. We assume Admins can have multiple root members.
+            if (parent_id) {
+                const childrenCount = await prisma.member.count({
+                    where: { parent_id }
+                });
+
+                if (childrenCount >= 2) {
+                    res.status(400).json({ error: 'The sponsor member already has a maximum of 2 downlines' });
+                    return;
+                }
+            }
+
+            const password_hash = await bcrypt.hash(password, 10);
+
+            const newMember = await prisma.$transaction(async (tx: any) => {
+                const member = await tx.member.create({
+                    data: {
+                        name,
+                        email,
+                        password_hash,
+                        phone,
+                        status: 'ACTIVE',
+                        admin_id,
+                        parent_id,
+                    },
+                });
+
+                await tx.invitation.update({
+                    where: { id: invitation.id },
+                    data: { status: 'USED' },
+                });
+
+                return member;
+            });
+
+            const token = jwt.sign({ id: newMember.id, role: 'MEMBER' }, JWT_SECRET, { expiresIn: expiresIn as any });
+
+            res.cookie('token', token, { httpOnly: true, maxAge: 24 * 60 * 60 * 1000 });
+            res.status(201).json({
+                message: 'Member registration successful',
+                token,
+                user: {
+                    id: newMember.id,
+                    name: newMember.name,
+                    email: newMember.email,
+                    role: 'MEMBER',
+                    parent_id: newMember.parent_id,
+                    admin_id: newMember.admin_id,
+                },
+            });
+
+        } else {
+            // Admin Registration
+            const password_hash = await bcrypt.hash(password, 10);
+
+            const newAdmin = await prisma.admin.create({
                 data: {
                     name,
                     email,
                     password_hash,
                     phone,
-                    city,
-                    role: 'MEMBER',
                     status: 'ACTIVE',
-                    parent_id: invitation.parent_id,
                 },
             });
 
-            await tx.invitation.update({
-                where: { id: invitation.id },
-                data: { status: 'USED' },
+            const token = jwt.sign({ id: newAdmin.id, role: 'ADMIN' }, JWT_SECRET, { expiresIn: expiresIn as any });
+
+            res.cookie('token', token, { httpOnly: true, maxAge: 8 * 60 * 60 * 1000 });
+            res.status(201).json({
+                message: 'Admin registration successful',
+                token,
+                user: {
+                    id: newAdmin.id,
+                    name: newAdmin.name,
+                    email: newAdmin.email,
+                    role: 'ADMIN',
+                },
             });
-
-            return user;
-        });
-
-        // Generate JWT
-        const token = jwt.sign({ id: newUser.id, role: newUser.role }, JWT_SECRET, { expiresIn: '1d' });
-
-        res.status(201).json({
-            message: 'Registration successful',
-            token,
-            user: {
-                id: newUser.id,
-                name: newUser.name,
-                email: newUser.email,
-                role: newUser.role,
-                parent_id: newUser.parent_id
-            },
-        });
+        }
     } catch (error) {
         console.error('Registration error', error);
         res.status(500).json({ error: 'Internal server error' });
@@ -95,31 +160,40 @@ export const login = async (req: Request, res: Response): Promise<void> => {
             return;
         }
 
-        // Find User
-        const user = await prisma.user.findFirst({
+        // Check Admin table
+        let user: any = await prisma.admin.findFirst({
             where: {
-                OR: [
-                    { email: email || undefined },
-                    { id: id || undefined }
-                ]
+                OR: [{ email: email || undefined }, { id: id || undefined }]
             },
         });
+        let userRole = 'ADMIN';
+
+        // Check Member table if not found in Admin
+        if (!user) {
+            user = await prisma.member.findFirst({
+                where: {
+                    OR: [{ email: email || undefined }, { id: id || undefined }]
+                },
+            });
+            userRole = 'MEMBER';
+        }
 
         if (!user) {
             res.status(404).json({ error: 'User not found' });
             return;
         }
 
-        // Validate Password
         const isValid = await bcrypt.compare(password, user.password_hash);
         if (!isValid) {
             res.status(401).json({ error: 'Invalid credentials' });
             return;
         }
 
-        // Generate JWT
-        const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '1d' });
+        const expiresIn = userRole === 'ADMIN' ? JWT_ADMIN_EXPIRES_IN : JWT_EXPIRES_IN;
+        const token = jwt.sign({ id: user.id, role: userRole }, JWT_SECRET, { expiresIn: expiresIn as any });
+        const maxAge = userRole === 'ADMIN' ? 8 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
 
+        res.cookie('token', token, { httpOnly: true, maxAge });
         res.status(200).json({
             message: 'Login successful',
             token,
@@ -127,7 +201,7 @@ export const login = async (req: Request, res: Response): Promise<void> => {
                 id: user.id,
                 name: user.name,
                 email: user.email,
-                role: user.role,
+                role: userRole,
             },
         });
     } catch (error) {
@@ -138,13 +212,31 @@ export const login = async (req: Request, res: Response): Promise<void> => {
 
 export const generateInvitation = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
-        const parent_id = req.user?.id;
-        if (!parent_id) {
+        const userId = req.user?.id;
+        const userRole = req.user?.role;
+
+        if (!userId) {
             res.status(401).json({ error: 'Unauthorized' });
             return;
         }
 
-        // Generate a simple random alphanumeric code (e.g., INV-XXXX)
+        let parent_id: string | null = null;
+        let admin_id: string | null = null;
+
+        if (userRole === 'ADMIN') {
+            admin_id = userId;
+            // Admin can optionally target a member parent
+            const { target_parent_id } = req.body;
+            if (target_parent_id) {
+                parent_id = target_parent_id;
+            }
+        } else if (userRole === 'MEMBER') {
+            parent_id = userId;
+        } else {
+            res.status(400).json({ error: 'Invalid user role' });
+            return;
+        }
+
         const randomString = Math.random().toString(36).substring(2, 6).toUpperCase();
         const code = `INV-${randomString}`;
 
@@ -152,6 +244,7 @@ export const generateInvitation = async (req: AuthRequest, res: Response): Promi
             data: {
                 code,
                 parent_id,
+                admin_id,
                 status: 'PENDING'
             }
         });
@@ -165,3 +258,124 @@ export const generateInvitation = async (req: AuthRequest, res: Response): Promi
         res.status(500).json({ error: 'Internal server error' });
     }
 };
+
+export const logout = (req: Request, res: Response): void => {
+    res.clearCookie('token');
+    res.status(200).json({ message: 'Logout successful' });
+};
+
+export const getProfile = async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+        const userId = req.user?.id;
+        const userRole = req.user?.role;
+
+        if (!userId || !userRole) {
+            res.status(401).json({ error: 'Unauthorized' });
+            return;
+        }
+
+        let profile;
+        if (userRole === 'ADMIN') {
+            profile = await prisma.admin.findUnique({ where: { id: userId }, select: { id: true, name: true, email: true, phone: true, city: true, identity_id: true, avatar: true, address: true, country: true, province: true, district: true, sub_district: true, village: true, rw: true, rt: true, occupation: true, bank_name: true, bank_account: true, bank_owner: true, status: true, created_at: true } });
+        } else {
+            profile = await prisma.member.findUnique({ where: { id: userId }, select: { id: true, name: true, email: true, phone: true, city: true, identity_id: true, avatar: true, address: true, country: true, province: true, district: true, sub_district: true, village: true, rw: true, rt: true, occupation: true, bank_name: true, bank_account: true, bank_owner: true, status: true, personal_sales: true, parent_id: true, admin_id: true, created_at: true } });
+        }
+
+        if (!profile) {
+            res.status(404).json({ error: 'Profile not found' });
+            return;
+        }
+
+        res.status(200).json({ profile });
+    } catch (error) {
+        console.error('Get profile error', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
+export const updateProfile = async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+        const userId = req.user?.id;
+        const userRole = req.user?.role;
+        const { name, phone, city, password, identity_id, avatar, address, country, province, district, sub_district, village, rw, rt, occupation, bank_name, bank_account, bank_owner } = req.body;
+
+        if (!userId || !userRole) {
+            res.status(401).json({ error: 'Unauthorized' });
+            return;
+        }
+
+        const updateData: any = {};
+        if (name) updateData.name = name;
+        if (phone) updateData.phone = phone;
+        if (city) updateData.city = city;
+        if (identity_id) updateData.identity_id = identity_id;
+        if (avatar) updateData.avatar = avatar;
+        if (address) updateData.address = address;
+        if (country) updateData.country = country;
+        if (province) updateData.province = province;
+        if (district) updateData.district = district;
+        if (sub_district) updateData.sub_district = sub_district;
+        if (village) updateData.village = village;
+        if (rw) updateData.rw = rw;
+        if (rt) updateData.rt = rt;
+        if (occupation) updateData.occupation = occupation;
+        if (bank_name) updateData.bank_name = bank_name;
+        if (bank_account) updateData.bank_account = bank_account;
+        if (bank_owner) updateData.bank_owner = bank_owner;
+        if (password) {
+            updateData.password_hash = await bcrypt.hash(password, 10);
+        }
+
+        let updatedProfile;
+        if (userRole === 'ADMIN') {
+            updatedProfile = await prisma.admin.update({
+                where: { id: userId },
+                data: updateData,
+                select: { id: true, name: true, email: true, phone: true, city: true, identity_id: true, avatar: true, address: true, country: true, province: true, district: true, sub_district: true, village: true, rw: true, rt: true, occupation: true, bank_name: true, bank_account: true, bank_owner: true, status: true }
+            });
+        } else {
+            updatedProfile = await prisma.member.update({
+                where: { id: userId },
+                data: updateData,
+                select: { id: true, name: true, email: true, phone: true, city: true, identity_id: true, avatar: true, address: true, country: true, province: true, district: true, sub_district: true, village: true, rw: true, rt: true, occupation: true, bank_name: true, bank_account: true, bank_owner: true, status: true }
+            });
+        }
+
+        res.status(200).json({ message: 'Profile updated successfully', profile: updatedProfile });
+    } catch (error) {
+        console.error('Update profile error', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
+export const deleteProfile = async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+        const userId = req.user?.id;
+        const userRole = req.user?.role;
+
+        if (!userId || !userRole) {
+            res.status(401).json({ error: 'Unauthorized' });
+            return;
+        }
+
+        // Soft delete by updating status to INACTIVE
+        if (userRole === 'ADMIN') {
+            await prisma.admin.update({
+                where: { id: userId },
+                data: { status: 'INACTIVE' }
+            });
+        } else {
+            await prisma.member.update({
+                where: { id: userId },
+                data: { status: 'INACTIVE' }
+            });
+        }
+
+        res.clearCookie('token');
+        res.status(200).json({ message: 'Account deleted (deactivated) successfully' });
+    } catch (error) {
+        console.error('Delete profile error', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
+

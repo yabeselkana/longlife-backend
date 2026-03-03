@@ -87,7 +87,7 @@ export const approveOrder = async (req: AuthRequest, res: Response): Promise<voi
             });
 
             // Update Personal Sales for member
-            await tx.user.update({
+            await tx.member.update({
                 where: { id: order.member_id },
                 data: {
                     personal_sales: { increment: order.total_amount }
@@ -104,7 +104,7 @@ export const approveOrder = async (req: AuthRequest, res: Response): Promise<voi
             let currentId = order.member_id;
 
             for (let i = 0; i < 3; i++) {
-                const user = await tx.user.findUnique({
+                const user = await tx.member.findUnique({
                     where: { id: currentId },
                     select: { parent_id: true }
                 });

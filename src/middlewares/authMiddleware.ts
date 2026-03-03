@@ -11,14 +11,19 @@ export interface AuthRequest extends Request {
 }
 
 export const authenticateToken = (req: AuthRequest, res: Response, next: NextFunction) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
+    // Try to get token from cookies first, then fallback to Authorization header
+    let token = req.cookies?.token;
+
+    if (!token) {
+        const authHeader = req.headers['authorization'];
+        token = authHeader && authHeader.split(' ')[1];
+    }
 
     if (!token) {
         return res.status(401).json({ error: 'Access token missing or invalid' });
     }
 
-    jwt.verify(token, JWT_SECRET, (err, user) => {
+    jwt.verify(token, JWT_SECRET, (err: any, user: any) => {
         if (err) return res.status(403).json({ error: 'Token is invalid or expired' });
         req.user = user as { id: string; role: string };
         next();
