@@ -37,7 +37,7 @@ export const updateProfileSchema = z.object({
         city: z.string().optional(),
         password: z.string().min(6, 'Password must be at least 6 characters').optional(),
         identity_id: z.string().optional(),
-        avatar: z.string().url('Avatar must be a valid URL').optional(),
+        avatar: z.string().optional(),
         address: z.string().optional(),
         country: z.string().optional(),
         province: z.string().optional(),
@@ -50,11 +50,11 @@ export const updateProfileSchema = z.object({
         bank_name: z.string().optional(),
         bank_account: z.string().optional(),
         bank_owner: z.string().optional(),
-    }).strict() // strict rejects any extra fields not defined here
+    })
 });
 
 export const generateInvitationSchema = z.object({
     body: z.object({
         target_parent_id: z.string().uuid('target_parent_id must be a valid UUID').optional()
-    }).strict()
+    })
 });

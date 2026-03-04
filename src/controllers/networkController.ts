@@ -83,8 +83,17 @@ export const getNetworkTree = async (req: AuthRequest, res: Response): Promise<v
 
         const maxDepth = 5;
 
+        // Global counters for the requested tree
+        let globalTotalNodes = 0;
+        let globalActiveNodes = 0;
+        let globalMaxDepth = 0;
+
         // Recursively build tree. Root can be Admin or Member, but children are always Members (or direct downlines for an Admin)
         const buildTree = async (parentId: string, currentDepth: number, parentRole: string): Promise<any> => {
+            if (currentDepth > globalMaxDepth) {
+                globalMaxDepth = currentDepth; // track deepest level reached
+            }
+
             if (currentDepth > maxDepth) {
                 return [];
             }
@@ -121,6 +130,11 @@ export const getNetworkTree = async (req: AuthRequest, res: Response): Promise<v
 
             const childrenWithSubtree: any[] = [];
             for (const child of children) {
+                globalTotalNodes++;
+                if (child.status === 'ACTIVE') {
+                    globalActiveNodes++;
+                }
+
                 const grandChildren = await buildTree(child.id, currentDepth + 1, 'MEMBER');
 
                 const total_commissions = child.commissions.reduce((sum, c) => sum + Number(c.amount), 0);
@@ -199,6 +213,14 @@ export const getNetworkTree = async (req: AuthRequest, res: Response): Promise<v
             }
         }
 
+        // Count the root node itself if it's a member (or decide if admin counts as a node)
+        if (rootNode) {
+            globalTotalNodes++;
+            if (rootNode.status === 'ACTIVE') {
+                globalActiveNodes++;
+            }
+        }
+
         const rootChildren = await buildTree(rootNode.id, 1, rootNode.role);
         const rootDownlineCount = rootChildren.length + rootChildren.reduce((acc: number, gc: any) => acc + (gc.downline_count || 0), 0);
 
@@ -216,6 +238,9 @@ export const getNetworkTree = async (req: AuthRequest, res: Response): Promise<v
             parent_name: rootParentName,
             total_commissions: rootTotalCommissions,
             downline_count: rootDownlineCount,
+            total_nodes_in_tree: globalTotalNodes,
+            active_nodes_in_tree: globalActiveNodes,
+            max_depth_in_tree: globalMaxDepth,
             children: rootChildren
         };
 

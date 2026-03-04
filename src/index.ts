@@ -7,6 +7,7 @@ import orderRoutes from './routes/orderRoutes';
 import networkRoutes from './routes/networkRoutes';
 import expenseRoutes from './routes/expenseRoutes';
 import dashboardRoutes from './routes/dashboardRoutes';
+import inventoryRoutes from './routes/inventoryRoutes';
 
 dotenv.config();
 
@@ -22,6 +23,7 @@ app.use('/api/v1/orders', orderRoutes);
 app.use('/api/v1/network', networkRoutes);
 app.use('/api/v1/expenses', expenseRoutes);
 app.use('/api/v1/dashboard', dashboardRoutes);
+app.use('/api/v1/inventory', inventoryRoutes);
 
 app.get('/health', (req, res) => {
     res.status(200).json({ status: 'OK' });
