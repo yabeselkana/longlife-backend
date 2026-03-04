@@ -36,3 +36,10 @@ export const requireAdmin = (req: AuthRequest, res: Response, next: NextFunction
     }
     next();
 };
+
+export const requireMember = (req: AuthRequest, res: Response, next: NextFunction) => {
+    if (req.user?.role !== 'MEMBER') {
+        return res.status(403).json({ error: 'Member access required' });
+    }
+    next();
+};

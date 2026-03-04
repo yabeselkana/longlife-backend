@@ -2,25 +2,78 @@ import { Request, Response } from 'express';
 import prisma from '../config/db';
 import { AuthRequest } from '../middlewares/authMiddleware';
 
+// Utility to find all downline IDs for a given member recursively
+const getAllDownlineIds = async (memberId: string): Promise<string[]> => {
+    const downlineIds: string[] = [];
+
+    const getChildrenStr = async (parentId: string) => {
+        const children = await prisma.member.findMany({
+            where: { parent_id: parentId },
+            select: { id: true }
+        });
+
+        for (const child of children) {
+            downlineIds.push(child.id);
+            await getChildrenStr(child.id);
+        }
+    };
+
+    await getChildrenStr(memberId);
+    return downlineIds;
+};
+
 export const getNetworkTree = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const rootId = req.query.rootId as string;
 
-        // Determine the root.
+        // Determine the root based on role
         let rootNode: any;
-        if (rootId) {
-            // Check Admin first
-            rootNode = await prisma.admin.findUnique({ where: { id: rootId } });
-            if (rootNode) rootNode.role = 'ADMIN';
 
-            // Check Member if not found in Admin
-            if (!rootNode) {
-                rootNode = await prisma.member.findUnique({ where: { id: rootId } });
+        // If the requester is a MEMBER, they can only see their own tree
+        // For simplicity, we force the rootId to be their own ID if they don't provide one, 
+        // or ensure they can't query above their own level.
+        // If the requester is a MEMBER, they can only see their own tree or a valid downline
+        if (req.user?.role === 'MEMBER') {
+            const requestedId = rootId || req.user.id;
+
+            // Validate if requestedId is in their downline or is themselves
+            if (requestedId !== req.user.id) {
+                const allowedDownlines = await getAllDownlineIds(req.user.id);
+                if (!allowedDownlines.includes(requestedId)) {
+                    res.status(403).json({ error: 'Access denied: You can only view your own downline network.' });
+                    return;
+                }
+            }
+
+            rootNode = await prisma.member.findUnique({ where: { id: requestedId } });
+            if (rootNode) rootNode.role = 'MEMBER';
+        } else {
+            // ADMIN logic
+            const requestedId = rootId || req.user!.id;
+
+            if (requestedId === req.user!.id) {
+                // If the admin is querying their own root
+                rootNode = await prisma.admin.findUnique({ where: { id: req.user!.id } });
+                if (rootNode) rootNode.role = 'ADMIN';
+            } else {
+                // An admin is trying to query a specific rootId
+                // It must be a member belonging to their admin network.
+                // An admin cannot query another admin.
+                const checkAdmin = await prisma.admin.findUnique({ where: { id: requestedId } });
+                if (checkAdmin) {
+                    res.status(403).json({ error: 'Access denied: You cannot view another Admin\'s network.' });
+                    return;
+                }
+
+                rootNode = await prisma.member.findUnique({ where: { id: requestedId } });
+
+                if (rootNode && rootNode.admin_id !== req.user!.id) {
+                    res.status(403).json({ error: 'Access denied: This member is not in your network.' });
+                    return;
+                }
+
                 if (rootNode) rootNode.role = 'MEMBER';
             }
-        } else {
-            rootNode = await prisma.admin.findFirst();
-            if (rootNode) rootNode.role = 'ADMIN';
         }
 
         if (!rootNode) {
@@ -49,14 +102,40 @@ export const getNetworkTree = async (req: AuthRequest, res: Response): Promise<v
                     name: true,
                     email: true,
                     status: true,
+                    phone: true,
+                    city: true,
+                    created_at: true,
+                    personal_sales: true,
+                    parent_id: true,
+                    parent: { select: { name: true } },
+                    admin: { select: { name: true } },
+                    commissions: {
+                        where: { status: 'PAID' },
+                        select: { amount: true }
+                    },
+                    _count: {
+                        select: { children: true }
+                    }
                 }
             });
 
             const childrenWithSubtree: any[] = [];
             for (const child of children) {
                 const grandChildren = await buildTree(child.id, currentDepth + 1, 'MEMBER');
+
+                const total_commissions = child.commissions.reduce((sum, c) => sum + Number(c.amount), 0);
+
+                // Calculate deeply nested downline count
+                const downline_count = grandChildren.length + grandChildren.reduce((acc: number, gc: any) => acc + (gc.downline_count || 0), 0);
+
+                // remove commissions and parent relation object from output to save bandwidth
+                const { commissions, parent, admin, _count, ...childData } = child;
+
                 childrenWithSubtree.push({
-                    ...child,
+                    ...childData,
+                    total_commissions,
+                    parent_name: parent?.name || admin?.name || null,
+                    downline_count,
                     role: 'MEMBER',
                     children: grandChildren
                 });
@@ -65,13 +144,79 @@ export const getNetworkTree = async (req: AuthRequest, res: Response): Promise<v
             return childrenWithSubtree;
         };
 
-        const treeData = {
+        let rootTotalCommissions = 0;
+        let rootPersonalSales = 0;
+        let rootParentName: string | null = null;
+
+        if (rootNode.parent_id && rootNode.role === 'MEMBER') {
+            const parent = await prisma.member.findUnique({ where: { id: rootNode.parent_id }, select: { name: true } });
+            if (parent) rootParentName = parent.name;
+        } else if (rootNode.parent_id && rootNode.role === 'ADMIN') {
+            const parentAdmin = await prisma.admin.findUnique({ where: { id: rootNode.parent_id }, select: { name: true } });
+            if (parentAdmin) rootParentName = parentAdmin.name;
+        }
+
+        if (rootNode.role === 'MEMBER') {
+            const commissions = await prisma.commission.findMany({
+                where: { member_id: rootNode.id, status: 'PAID' },
+                select: { amount: true }
+            });
+            rootTotalCommissions = commissions.reduce((sum, c) => sum + Number(c.amount), 0);
+            rootPersonalSales = Number(rootNode.personal_sales) || 0;
+        } else if (rootNode.role === 'ADMIN') {
+            // all paid commissions to show total system payouts, or just mock as per request.
+            // But if we want it to match exactly the screenshot, we can query total system commissions and sales
+            // Restrict admin aggregate to ONLY their own members
+
+            // First fetch all members for this admin
+            const adminMembers = await prisma.member.findMany({
+                where: { admin_id: rootNode.id },
+                select: { id: true }
+            });
+            const adminMemberIds = adminMembers.map(m => m.id);
+
+            if (adminMemberIds.length > 0) {
+                const totalCommissions = await prisma.commission.aggregate({
+                    where: {
+                        status: 'PAID',
+                        member_id: { in: adminMemberIds }
+                    },
+                    _sum: { amount: true }
+                });
+                rootTotalCommissions = Number(totalCommissions._sum.amount || 0);
+
+                const totalSales = await prisma.order.aggregate({
+                    where: {
+                        status: 'APPROVED',
+                        member_id: { in: adminMemberIds }
+                    },
+                    _sum: { total_amount: true }
+                });
+                rootPersonalSales = Number(totalSales._sum.total_amount || 0);
+            } else {
+                rootTotalCommissions = 0;
+                rootPersonalSales = 0;
+            }
+        }
+
+        const rootChildren = await buildTree(rootNode.id, 1, rootNode.role);
+        const rootDownlineCount = rootChildren.length + rootChildren.reduce((acc: number, gc: any) => acc + (gc.downline_count || 0), 0);
+
+        const treeData: any = {
             id: rootNode.id,
             name: rootNode.name,
             email: rootNode.email,
             role: rootNode.role,
             status: rootNode.status,
-            children: await buildTree(rootNode.id, 1, rootNode.role)
+            phone: rootNode.phone || null,
+            city: rootNode.district || null,
+            created_at: rootNode.created_at || new Date('2023-01-01').toISOString(),
+            personal_sales: rootPersonalSales,
+            parent_id: rootNode.parent_id || null,
+            parent_name: rootParentName,
+            total_commissions: rootTotalCommissions,
+            downline_count: rootDownlineCount,
+            children: rootChildren
         };
 
         res.status(200).json({ tree: treeData });
@@ -103,6 +248,24 @@ export const getMembers = async (req: AuthRequest, res: Response): Promise<void>
                 ]
             }
             : {};
+        // If the requester is a MEMBER, restrict the list to their entire downline hierarchy
+        if (req.user?.role === 'MEMBER') {
+            const downlineIds = await getAllDownlineIds(req.user.id);
+
+            // If they have no downlines, return empty list immediately to save query
+            if (downlineIds.length === 0) {
+                res.status(200).json({
+                    data: [],
+                    meta: { total: 0, page: pageNumber, limit: limitNumber, totalPages: 0 }
+                });
+                return;
+            }
+
+            whereClause.id = { in: downlineIds };
+        } else if (req.user?.role === 'ADMIN') {
+            // If the requester is an ADMIN, restrict the list to members belonging to their network
+            whereClause.admin_id = req.user!.id;
+        }
 
         const [members, total] = await Promise.all([
             prisma.member.findMany({
@@ -120,14 +283,34 @@ export const getMembers = async (req: AuthRequest, res: Response): Promise<void>
                     personal_sales: true,
                     created_at: true,
                     parent_id: true,
-                    admin_id: true
+                    parent: { select: { name: true } },
+                    admin_id: true,
+                    admin: { select: { name: true } },
+                    commissions: {
+                        where: { status: 'PAID' },
+                        select: { amount: true }
+                    },
+                    _count: {
+                        select: { children: true }
+                    }
                 }
             }),
             prisma.member.count({ where: whereClause })
         ]);
 
+        const mappedMembers = members.map(m => {
+            const total_commissions = m.commissions.reduce((sum, c) => sum + Number(c.amount), 0);
+            const { commissions, parent, admin, _count, ...memberData } = m;
+            return {
+                ...memberData,
+                parent_name: parent?.name || admin?.name || null,
+                downline_count: _count.children,
+                total_commissions
+            };
+        });
+
         res.status(200).json({
-            data: members,
+            data: mappedMembers,
             meta: {
                 total,
                 page: pageNumber,
