@@ -10,7 +10,7 @@ const JWT_ADMIN_EXPIRES_IN = process.env.JWT_ADMIN_EXPIRES_IN || '8h'; // Token 
 
 export const register = async (req: Request, res: Response): Promise<void> => {
     try {
-        const { name, email, password, phone, invitation_code, role } = req.body;
+        const { name, email, password, phone, city, invitation_code, role } = req.body;
 
         if (!name || !email || !password) {
             res.status(400).json({ error: 'Missing required fields' });
@@ -31,37 +31,42 @@ export const register = async (req: Request, res: Response): Promise<void> => {
         const expiresIn = userRole === 'ADMIN' ? JWT_ADMIN_EXPIRES_IN : JWT_EXPIRES_IN;
 
         if (userRole === 'MEMBER') {
-            if (!invitation_code) {
-                res.status(400).json({ error: 'Missing invitation_code for member registration' });
-                return;
-            }
+            if (invitation_code) {
+                const invitation = await prisma.invitation.findUnique({
+                    where: { code: invitation_code },
+                    include: { parent: true, admin: true }
+                });
 
-            const invitation = await prisma.invitation.findUnique({
-                where: { code: invitation_code },
-                include: { parent: true, admin: true }
-            });
+                if (!invitation) {
+                    res.status(400).json({ error: 'Invalid invitation code' });
+                    return;
+                }
 
-            if (!invitation) {
-                res.status(400).json({ error: 'Invalid invitation code' });
-                return;
-            }
+                if (invitation.status !== 'PENDING') {
+                    res.status(400).json({ error: 'Invitation code has already been used or is cancelled' });
+                    return;
+                }
 
-            if (invitation.status !== 'PENDING') {
-                res.status(400).json({ error: 'Invitation code has already been used or is cancelled' });
-                return;
-            }
+                parent_id = invitation.parent_id;
+                // Admin ID is inherited from the parent if a parent exists, otherwise directly from the Admin who created the invitation
+                admin_id = invitation.parent ? invitation.parent.admin_id : (invitation.admin_id || null);
 
-            parent_id = invitation.parent_id;
-            // Admin ID is inherited from the parent if a parent exists, otherwise directly from the Admin who created the invitation
-            admin_id = invitation.parent ? invitation.parent.admin_id : (invitation.admin_id || null);
-
-            if (!admin_id) {
-                res.status(400).json({ error: 'Invitation does not have a valid admin association' });
-                return;
+                if (!admin_id) {
+                    res.status(400).json({ error: 'Invitation does not have a valid admin association' });
+                    return;
+                }
+            } else {
+                // Direct registration without invitation code: Directly under admin (Root Member)
+                const topAdmin = await prisma.admin.findFirst();
+                if (!topAdmin) {
+                    res.status(500).json({ error: 'System configuration error: No admins exist' });
+                    return;
+                }
+                admin_id = topAdmin.id;
+                parent_id = null;
             }
 
             // BINARY TREE LOGIC: Max 2 downlines per sponsor
-            // Note: If parent_id is null, it means it's a root node directly under an admin. We assume Admins can have multiple root members.
             if (parent_id) {
                 const childrenCount = await prisma.member.count({
                     where: { parent_id }
@@ -82,16 +87,19 @@ export const register = async (req: Request, res: Response): Promise<void> => {
                         email,
                         password_hash,
                         phone,
+                        city,
                         status: 'ACTIVE',
                         admin_id,
                         parent_id,
                     },
                 });
 
-                await tx.invitation.update({
-                    where: { id: invitation.id },
-                    data: { status: 'USED' },
-                });
+                if (invitation_code) {
+                    await tx.invitation.update({
+                        where: { code: invitation_code },
+                        data: { status: 'USED' },
+                    });
+                }
 
                 return member;
             });
@@ -106,6 +114,8 @@ export const register = async (req: Request, res: Response): Promise<void> => {
                     id: newMember.id,
                     name: newMember.name,
                     email: newMember.email,
+                    phone: newMember.phone,
+                    city: newMember.city,
                     role: 'MEMBER',
                     parent_id: newMember.parent_id,
                     admin_id: newMember.admin_id,
@@ -122,6 +132,7 @@ export const register = async (req: Request, res: Response): Promise<void> => {
                     email,
                     password_hash,
                     phone,
+                    city,
                     status: 'ACTIVE',
                 },
             });
@@ -136,6 +147,8 @@ export const register = async (req: Request, res: Response): Promise<void> => {
                     id: newAdmin.id,
                     name: newAdmin.name,
                     email: newAdmin.email,
+                    phone: newAdmin.phone,
+                    city: newAdmin.city,
                     role: 'ADMIN',
                 },
             });
@@ -206,55 +219,6 @@ export const login = async (req: Request, res: Response): Promise<void> => {
         });
     } catch (error) {
         console.error('Login error', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-};
-
-export const generateInvitation = async (req: AuthRequest, res: Response): Promise<void> => {
-    try {
-        const userId = req.user?.id;
-        const userRole = req.user?.role;
-
-        if (!userId) {
-            res.status(401).json({ error: 'Unauthorized' });
-            return;
-        }
-
-        let parent_id: string | null = null;
-        let admin_id: string | null = null;
-
-        if (userRole === 'ADMIN') {
-            admin_id = userId;
-            // Admin can optionally target a member parent
-            const { target_parent_id } = req.body;
-            if (target_parent_id) {
-                parent_id = target_parent_id;
-            }
-        } else if (userRole === 'MEMBER') {
-            parent_id = userId;
-        } else {
-            res.status(400).json({ error: 'Invalid user role' });
-            return;
-        }
-
-        const randomString = Math.random().toString(36).substring(2, 6).toUpperCase();
-        const code = `INV-${randomString}`;
-
-        const invitation = await prisma.invitation.create({
-            data: {
-                code,
-                parent_id,
-                admin_id,
-                status: 'PENDING'
-            }
-        });
-
-        res.status(201).json({
-            message: 'Invitation code generated',
-            invitation
-        });
-    } catch (error) {
-        console.error('Generate invitation error', error);
         res.status(500).json({ error: 'Internal server error' });
     }
 };
@@ -378,4 +342,3 @@ export const deleteProfile = async (req: AuthRequest, res: Response): Promise<vo
         res.status(500).json({ error: 'Internal server error' });
     }
 };
-

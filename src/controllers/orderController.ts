@@ -4,6 +4,46 @@ import { generateCommission } from '../services/commissionService';
 import { AuthRequest } from '../middlewares/authMiddleware';
 import { OrderStatus } from '@prisma/client';
 
+export const getAllOrders = async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+        const orders = await prisma.order.findMany({
+            include: {
+                member: { select: { name: true, email: true } },
+                product: { select: { name: true, price: true } }
+            },
+            orderBy: { created_at: 'desc' }
+        });
+
+        res.status(200).json({ orders });
+    } catch (error) {
+        console.error('Get all orders error', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
+export const getMyOrders = async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+        const member_id = req.user?.id;
+        if (!member_id) {
+            res.status(400).json({ error: 'Member not found' });
+            return;
+        }
+
+        const orders = await prisma.order.findMany({
+            where: { member_id },
+            include: {
+                product: { select: { name: true, price: true } }
+            },
+            orderBy: { created_at: 'desc' }
+        });
+
+        res.status(200).json({ orders });
+    } catch (error) {
+        console.error('Get my orders error', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
 export const createOrder = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const { sku, qty } = req.body;
@@ -119,7 +159,7 @@ export const approveOrder = async (req: AuthRequest, res: Response): Promise<voi
                         related_order_id: approvedOrder.id,
                         amount: commission_amount,
                         type: 'Network Bonus',
-                        status: 'PAID'
+                        status: 'PENDING'
                     }
                 });
 
@@ -133,3 +173,32 @@ export const approveOrder = async (req: AuthRequest, res: Response): Promise<voi
         res.status(400).json({ error: error.message || 'Internal server error' });
     }
 };
+
+export const rejectOrder = async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+        const orderId = Number(req.params.id);
+
+        const order = await prisma.order.findUnique({ where: { id: orderId } });
+
+        if (!order) {
+            res.status(404).json({ error: 'Order not found' });
+            return;
+        }
+
+        if (order.status !== 'PENDING') {
+            res.status(400).json({ error: `Order cannot be cancelled because it is already ${order.status}` });
+            return;
+        }
+
+        await prisma.order.update({
+            where: { id: orderId },
+            data: { status: 'CANCELLED' }
+        });
+
+        res.status(200).json({ message: 'Order rejected and cancelled successfully' });
+    } catch (error) {
+        console.error('Reject order error', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
+

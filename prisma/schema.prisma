@@ -151,6 +151,7 @@ enum OrderStatus {
 enum CommissionStatus {
   PENDING
   PAID
+  CANCELLED
 }
 
 enum InvitationStatus {

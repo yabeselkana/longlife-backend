@@ -6,16 +6,9 @@ export const registerSchema = z.object({
         email: z.string().email('Invalid email format'),
         password: z.string().min(6, 'Password must be at least 6 characters'),
         phone: z.string().optional(),
+        city: z.string().optional(),
         role: z.enum(['ADMIN', 'MEMBER']).optional(),
         invitation_code: z.string().optional()
-    }).refine((data) => {
-        if (data.role === 'MEMBER' && !data.invitation_code) {
-            return false;
-        }
-        return true;
-    }, {
-        message: 'invitation_code is required for member registration',
-        path: ['invitation_code']
     })
 });
 

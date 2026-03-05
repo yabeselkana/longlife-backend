@@ -8,6 +8,8 @@ import networkRoutes from './routes/networkRoutes';
 import expenseRoutes from './routes/expenseRoutes';
 import dashboardRoutes from './routes/dashboardRoutes';
 import inventoryRoutes from './routes/inventoryRoutes';
+import commissionRoutes from './routes/commissionRoutes';
+import invitationRoutes from './routes/invitationRoutes';
 
 dotenv.config();
 
@@ -24,6 +26,8 @@ app.use('/api/v1/network', networkRoutes);
 app.use('/api/v1/expenses', expenseRoutes);
 app.use('/api/v1/dashboard', dashboardRoutes);
 app.use('/api/v1/inventory', inventoryRoutes);
+app.use('/api/v1/commissions', commissionRoutes);
+app.use('/api/v1/invitations', invitationRoutes);
 
 app.get('/health', (req, res) => {
     res.status(200).json({ status: 'OK' });

@@ -73,6 +73,63 @@ export const getAdminSummary = async (req: AuthRequest, res: Response): Promise<
             _sum: { amount: true }
         });
 
+        const topPerformers = await prisma.member.findMany({
+            orderBy: { personal_sales: 'desc' },
+            take: 5,
+            select: {
+                id: true,
+                name: true,
+                email: true,
+                personal_sales: true,
+                created_at: true
+            }
+        });
+
+        // Revenue Analytics (For Charts)
+        const approvedOrdersAll = await prisma.order.findMany({
+            where: { status: 'APPROVED' },
+            select: { total_amount: true, created_at: true }
+        });
+
+        const dayMap: Record<string, number> = {};
+        for (let i = 13; i >= 0; i--) {
+            const d = new Date();
+            d.setDate(d.getDate() - i);
+            dayMap[d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })] = 0;
+        }
+
+        const monthMap: Record<string, number> = {};
+        for (let i = 5; i >= 0; i--) {
+            const d = new Date();
+            d.setMonth(d.getMonth() - i);
+            monthMap[d.toLocaleDateString('en-US', { month: 'short' })] = 0;
+        }
+
+        const yearMap: Record<string, number> = {};
+        for (let i = 2; i >= 0; i--) {
+            yearMap[(new Date().getFullYear() - i).toString()] = 0;
+        }
+
+        approvedOrdersAll.forEach(o => {
+            const d = new Date(o.created_at);
+            const amt = Number(o.total_amount);
+
+            const dayKey = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            if (dayMap[dayKey] !== undefined) dayMap[dayKey] += amt;
+
+            const monthKey = d.toLocaleDateString('en-US', { month: 'short' });
+            if (monthMap[monthKey] !== undefined) monthMap[monthKey] += amt;
+
+            const yearKey = d.getFullYear().toString();
+            if (yearMap[yearKey] !== undefined) yearMap[yearKey] += amt;
+        });
+
+        const revenueAnalytics = {
+            day: Object.entries(dayMap).map(([name, sales]) => ({ name, sales })),
+            month: Object.entries(monthMap).map(([name, sales]) => ({ name, sales })),
+            year: Object.entries(yearMap).map(([name, sales]) => ({ name, sales }))
+        };
+
         const totalRevenue = Number(approvedOrders._sum.total_amount || 0);
         const totalCommissions = Number(paidCommissions._sum.amount || 0);
         const totalExpenses = Number(paidExpenses._sum.amount || 0);
@@ -84,7 +141,9 @@ export const getAdminSummary = async (req: AuthRequest, res: Response): Promise<
                 totalRevenue,
                 totalCommissions,
                 totalExpenses,
-                netProfit
+                netProfit,
+                topPerformers,
+                revenueAnalytics
             }
         });
     } catch (error) {
