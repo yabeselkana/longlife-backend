@@ -103,14 +103,14 @@ model Order {
 model Commission {
   id               Int              @id @default(autoincrement())
   member_id        String
-  related_order_id Int
+  related_order_id Int?
   type             String           @default("Network Bonus")
   amount           Decimal          @db.Decimal(10, 2)
   status           CommissionStatus @default(PENDING)
   created_at       DateTime         @default(now())
   updated_at       DateTime         @updatedAt
   member           Member           @relation(fields: [member_id], references: [id])
-  order            Order            @relation(fields: [related_order_id], references: [id])
+  order            Order?           @relation(fields: [related_order_id], references: [id])
 }
 
 model Invitation {
@@ -164,4 +164,26 @@ enum ExpenseStatus {
   PENDING
   PROCESSING
   PAID
+}
+
+model SystemSetting {
+  id                         Int      @id @default(autoincrement())
+  base_commission_percentage Decimal  @default(25.00) @db.Decimal(5, 2)
+  halving_logic              String   @default("Standard")
+  reduction_factor           Decimal  @default(0.50) @db.Decimal(3, 2)
+  max_depth_limit            Int      @default(10)
+  effective_date             DateTime @default(now())
+  
+  min_payout_threshold       Decimal  @default(500000.00) @db.Decimal(15, 2)
+  supported_methods          String   @default("Bank Transfer")
+  payout_cycle               String   @default("Weekly")
+  automatic_approvals        Boolean  @default(false)
+
+  max_order_limit            Int      @default(50)
+  low_stock_threshold        Int      @default(20)
+  invite_expiration_days     Int      @default(7)
+  
+  system_lock                Boolean  @default(false)
+  
+  updated_at                 DateTime @updatedAt
 }

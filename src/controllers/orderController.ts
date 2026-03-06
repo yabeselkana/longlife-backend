@@ -138,33 +138,13 @@ export const approveOrder = async (req: AuthRequest, res: Response): Promise<voi
             // Passing tx might be tricky since commissionService uses the global prisma instance, 
             // but in a real-world scenario you'd pass the transaction client (tx).
             // For this implementation, we will perform it after the transaction or inline it here.
-            // Refactoring it inline to ensure transactional integrity:
-
-            const rates = [0.25, 0.125, 0.0625];
-            let currentId = order.member_id;
-
-            for (let i = 0; i < 3; i++) {
-                const user = await tx.member.findUnique({
-                    where: { id: currentId },
-                    select: { parent_id: true }
-                });
-
-                if (!user || !user.parent_id) break;
-
-                const commission_amount = Number(order.total_amount) * rates[i];
-
-                await tx.commission.create({
-                    data: {
-                        member_id: user.parent_id,
-                        related_order_id: approvedOrder.id,
-                        amount: commission_amount,
-                        type: 'Network Bonus',
-                        status: 'PENDING'
-                    }
-                });
-
-                currentId = user.parent_id;
-            }
+            // Trigger Commission Halving Logic based on System Settings
+            await generateCommission(
+                Number(order.total_amount),
+                order.member_id,
+                approvedOrder.id,
+                tx
+            );
         });
 
         res.status(200).json({ message: 'Order approved and commissions generated' });
