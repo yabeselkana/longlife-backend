@@ -1,12 +1,89 @@
 import { Request, Response } from 'express';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
+import { OAuth2Client } from 'google-auth-library';
 import prisma from '../config/db';
 import { AuthRequest } from '../middlewares/authMiddleware';
 
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 const JWT_SECRET = process.env.JWT_SECRET || 'supersecretkey123';
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '1d'; // Token member = 1 hari
-const JWT_ADMIN_EXPIRES_IN = process.env.JWT_ADMIN_EXPIRES_IN || '8h'; // Token admin = 8 jam
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '1d';
+const JWT_ADMIN_EXPIRES_IN = process.env.JWT_ADMIN_EXPIRES_IN || '8h';
+
+export const googleLogin = async (req: Request, res: Response): Promise<void> => {
+    try {
+        const { token: googleToken } = req.body;
+
+        if (!googleToken) {
+            res.status(400).json({ error: 'Google token is required' });
+            return;
+        }
+
+        const ticket = await client.verifyIdToken({
+            idToken: googleToken,
+            audience: process.env.GOOGLE_CLIENT_ID,
+        });
+
+        const payload = ticket.getPayload();
+        if (!payload || !payload.email) {
+            res.status(400).json({ error: 'Invalid Google token' });
+            return;
+        }
+
+        const { email, name, picture } = payload;
+
+        // Check if user exists in Admin or Member
+        let user: any = await prisma.admin.findUnique({ where: { email } });
+        let userRole = 'ADMIN';
+
+        if (!user) {
+            user = await prisma.member.findUnique({ where: { email } });
+            userRole = 'MEMBER';
+        }
+
+        // If user doesn't exist, register them as a Member
+        if (!user) {
+            const topAdmin = await prisma.admin.findFirst();
+            if (!topAdmin) {
+                res.status(500).json({ error: 'System configuration error: No admins exist' });
+                return;
+            }
+
+            user = await prisma.member.create({
+                data: {
+                    name: name || 'Google User',
+                    email: email,
+                    password_hash: '', // Google users don't have a local password
+                    avatar: picture,
+                    status: 'ACTIVE',
+                    admin_id: topAdmin.id,
+                },
+            });
+            userRole = 'MEMBER';
+        }
+
+        const expiresIn = userRole === 'ADMIN' ? JWT_ADMIN_EXPIRES_IN : JWT_EXPIRES_IN;
+        const token = jwt.sign({ id: user.id, role: userRole }, JWT_SECRET, { expiresIn: expiresIn as any });
+        const maxAge = userRole === 'ADMIN' ? 8 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+
+        res.cookie('token', token, { httpOnly: true, maxAge });
+        res.status(200).json({
+            message: 'Google login successful',
+            token,
+            user: {
+                id: user.id,
+                name: user.name,
+                email: user.email,
+                role: userRole,
+                avatar: user.avatar
+            },
+        });
+    } catch (error) {
+        console.error('Google login error', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
 
 export const register = async (req: Request, res: Response): Promise<void> => {
     try {
@@ -269,23 +346,18 @@ export const updateProfile = async (req: AuthRequest, res: Response): Promise<vo
         }
 
         const updateData: any = {};
-        if (name) updateData.name = name;
-        if (phone) updateData.phone = phone;
-        if (city) updateData.city = city;
-        if (identity_id) updateData.identity_id = identity_id;
-        if (avatar) updateData.avatar = avatar;
-        if (address) updateData.address = address;
-        if (country) updateData.country = country;
-        if (province) updateData.province = province;
-        if (district) updateData.district = district;
-        if (sub_district) updateData.sub_district = sub_district;
-        if (village) updateData.village = village;
-        if (rw) updateData.rw = rw;
-        if (rt) updateData.rt = rt;
-        if (occupation) updateData.occupation = occupation;
-        if (bank_name) updateData.bank_name = bank_name;
-        if (bank_account) updateData.bank_account = bank_account;
-        if (bank_owner) updateData.bank_owner = bank_owner;
+        const fields = [
+            'name', 'phone', 'city', 'identity_id', 'avatar', 'address',
+            'country', 'province', 'district', 'sub_district', 'village',
+            'rw', 'rt', 'occupation', 'bank_name', 'bank_account', 'bank_owner'
+        ];
+
+        fields.forEach(field => {
+            if (field in req.body) {
+                updateData[field] = req.body[field];
+            }
+        });
+
         if (password) {
             updateData.password_hash = await bcrypt.hash(password, 10);
         }
@@ -305,7 +377,7 @@ export const updateProfile = async (req: AuthRequest, res: Response): Promise<vo
             });
         }
 
-        res.status(200).json({ message: 'Profile updated successfully', profile: updatedProfile });
+        res.status(200).json({ message: 'Profile updated successfully', user: updatedProfile });
     } catch (error) {
         console.error('Update profile error', error);
         res.status(500).json({ error: 'Internal server error' });
@@ -339,6 +411,45 @@ export const deleteProfile = async (req: AuthRequest, res: Response): Promise<vo
         res.status(200).json({ message: 'Account deleted (deactivated) successfully' });
     } catch (error) {
         console.error('Delete profile error', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
+export const updateAvatar = async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+        const userId = req.user?.id;
+        const userRole = req.user?.role;
+
+        if (!userId || !userRole) {
+            res.status(401).json({ error: 'Unauthorized' });
+            return;
+        }
+
+        if (!(req as any).file) {
+            res.status(400).json({ error: 'No image file provided' });
+            return;
+        }
+
+        const avatarUrl = (req as any).file.path;
+
+        if (userRole === 'ADMIN') {
+            await prisma.admin.update({
+                where: { id: userId },
+                data: { avatar: avatarUrl }
+            });
+        } else {
+            await prisma.member.update({
+                where: { id: userId },
+                data: { avatar: avatarUrl }
+            });
+        }
+
+        res.status(200).json({
+            message: 'Profile picture updated successfully',
+            avatar: avatarUrl
+        });
+    } catch (error) {
+        console.error('Update avatar error', error);
         res.status(500).json({ error: 'Internal server error' });
     }
 };

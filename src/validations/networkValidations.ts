@@ -9,9 +9,9 @@ export const getNetworkTreeSchema = z.object({
 export const getMembersSchema = z.object({
     query: z.object({
         search: z.string().optional(),
-        sortBy: z.enum(['name', 'email', 'status', 'created_at', 'personal_sales']).optional(),
+        sortBy: z.enum(['name', 'email', 'status', 'created_at', 'personal_sales', 'commissions', 'downline', 'city']).optional(),
         order: z.enum(['asc', 'desc']).optional(),
-        page: z.string().refine(val => !isNaN(Number(val)) && Number(val) > 0, { message: 'Page must be a positive number' }).optional(),
-        limit: z.string().refine(val => !isNaN(Number(val)) && Number(val) > 0, { message: 'Limit must be a positive number' }).optional()
+        page: z.preprocess((val) => val === undefined ? undefined : String(val), z.string().refine(val => !isNaN(Number(val)) && Number(val) > 0).optional()),
+        limit: z.preprocess((val) => val === undefined ? undefined : String(val), z.string().refine(val => !isNaN(Number(val)) && Number(val) > 0).optional())
     })
 });

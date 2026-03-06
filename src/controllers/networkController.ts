@@ -311,6 +311,58 @@ export const deleteMember = async (req: AuthRequest, res: Response): Promise<voi
     }
 };
 
+export const updateMember = async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+        if (req.user?.role !== 'ADMIN') {
+            res.status(403).json({ error: 'Access denied: Only admins can update members.' });
+            return;
+        }
+
+        const id = req.params.id as string;
+        const { name, phone, city, status, personal_sales, identity_id, avatar, address, country, province, district, sub_district, village, rw, rt, occupation, bank_name, bank_account, bank_owner } = req.body;
+
+        const member = await prisma.member.findUnique({ where: { id } });
+
+        if (!member) {
+            res.status(404).json({ error: 'Member not found.' });
+            return;
+        }
+
+        // Ensure the member belongs to the requesting admin's network
+        if (member.admin_id !== req.user!.id) {
+            res.status(403).json({ error: 'Access denied: This member is not in your network.' });
+            return;
+        }
+
+        const updateData: any = {};
+        const fields = [
+            'name', 'phone', 'city', 'status', 'identity_id', 'avatar', 'address',
+            'country', 'province', 'district', 'sub_district', 'village',
+            'rw', 'rt', 'occupation', 'bank_name', 'bank_account', 'bank_owner'
+        ];
+
+        fields.forEach(field => {
+            if (field in req.body) {
+                updateData[field] = req.body[field];
+            }
+        });
+
+        if (personal_sales !== undefined) {
+            updateData.personal_sales = Number(personal_sales);
+        }
+
+        const updatedMember = await prisma.member.update({
+            where: { id },
+            data: updateData,
+        });
+
+        res.status(200).json({ message: 'Member updated successfully.', member: updatedMember });
+    } catch (error) {
+        console.error('Update member error', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
 export const getMembers = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const search = req.query.search as string | undefined;
@@ -324,9 +376,11 @@ export const getMembers = async (req: AuthRequest, res: Response): Promise<void>
         const skip = (pageNumber - 1) * limitNumber;
 
         // Valid sorting fields
-        const validSortFields = ['name', 'email', 'status', 'created_at', 'personal_sales'];
-        const orderByField = validSortFields.includes(sortBy as string) ? (sortBy as string) : 'created_at';
+        const validSortFields = ['name', 'email', 'status', 'created_at', 'personal_sales', 'city'];
         const orderByDirection = order === 'asc' ? 'asc' : 'desc';
+
+        let members;
+        let totalCount;
 
         // Build the where clause for search
         const whereClause: any = search
@@ -337,6 +391,7 @@ export const getMembers = async (req: AuthRequest, res: Response): Promise<void>
                 ]
             }
             : {};
+
         // If the requester is a MEMBER, restrict the list to their entire downline hierarchy
         if (req.user?.role === 'MEMBER') {
             const downlineIds = await getAllDownlineIds(req.user.id);
@@ -356,12 +411,11 @@ export const getMembers = async (req: AuthRequest, res: Response): Promise<void>
             whereClause.admin_id = req.user!.id;
         }
 
-        const [members, total] = await Promise.all([
-            prisma.member.findMany({
+        // Specialized sorting for 'commissions' or 'downline' (if count-based)
+        if (sortBy === 'commissions' || sortBy === 'downline') {
+            // Fetch all matching members to perform in-memory calculation and sorting
+            const allMatchingMembers = await prisma.member.findMany({
                 where: whereClause,
-                orderBy: { [orderByField]: orderByDirection },
-                skip,
-                take: limitNumber,
                 select: {
                     id: true,
                     name: true,
@@ -383,28 +437,83 @@ export const getMembers = async (req: AuthRequest, res: Response): Promise<void>
                         select: { children: true }
                     }
                 }
-            }),
-            prisma.member.count({ where: whereClause })
-        ]);
+            });
 
-        const mappedMembers = members.map(m => {
-            const total_commissions = m.commissions.reduce((sum, c) => sum + Number(c.amount), 0);
-            const { commissions, parent, admin, _count, ...memberData } = m;
-            return {
-                ...memberData,
-                parent_name: parent?.name || admin?.name || null,
-                downline_count: _count.children,
-                total_commissions
-            };
-        });
+            const mappedAll = allMatchingMembers.map(m => {
+                const total_commissions = m.commissions.reduce((sum, c) => sum + Number(c.amount), 0);
+                const { commissions, parent, admin, _count, ...memberData } = m;
+                return {
+                    ...memberData,
+                    parent_name: parent?.name || admin?.name || null,
+                    downline_count: _count.children,
+                    total_commissions
+                };
+            });
+
+            // Sort in-memory
+            mappedAll.sort((a, b) => {
+                const valA = sortBy === 'commissions' ? a.total_commissions : a.downline_count;
+                const valB = sortBy === 'commissions' ? b.total_commissions : b.downline_count;
+                return orderByDirection === 'asc' ? valA - valB : valB - valA;
+            });
+
+            totalCount = mappedAll.length;
+            members = mappedAll.slice(skip, skip + limitNumber);
+        } else {
+            // Standard database sorting for direct fields
+            const orderByField = validSortFields.includes(sortBy as string) ? (sortBy as string) : 'created_at';
+
+            const [dbMembers, count] = await Promise.all([
+                prisma.member.findMany({
+                    where: whereClause,
+                    orderBy: { [orderByField]: orderByDirection },
+                    skip,
+                    take: limitNumber,
+                    select: {
+                        id: true,
+                        name: true,
+                        email: true,
+                        phone: true,
+                        city: true,
+                        status: true,
+                        personal_sales: true,
+                        created_at: true,
+                        parent_id: true,
+                        parent: { select: { name: true } },
+                        admin_id: true,
+                        admin: { select: { name: true } },
+                        commissions: {
+                            where: { status: 'PAID' },
+                            select: { amount: true }
+                        },
+                        _count: {
+                            select: { children: true }
+                        }
+                    }
+                }),
+                prisma.member.count({ where: whereClause })
+            ]);
+
+            totalCount = count;
+            members = dbMembers.map(m => {
+                const total_commissions = m.commissions.reduce((sum, c) => sum + Number(c.amount), 0);
+                const { commissions, parent, admin, _count, ...memberData } = m;
+                return {
+                    ...memberData,
+                    parent_name: parent?.name || admin?.name || null,
+                    downline_count: _count.children,
+                    total_commissions
+                };
+            });
+        }
 
         res.status(200).json({
-            data: mappedMembers,
+            data: members,
             meta: {
-                total,
+                total: totalCount,
                 page: pageNumber,
                 limit: limitNumber,
-                totalPages: Math.ceil(total / limitNumber)
+                totalPages: Math.ceil(totalCount / limitNumber)
             }
         });
     } catch (error) {
