@@ -251,9 +251,73 @@ export const getNetworkTree = async (req: AuthRequest, res: Response): Promise<v
     }
 };
 
+export const deleteMember = async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+        if (req.user?.role !== 'ADMIN') {
+            res.status(403).json({ error: 'Access denied: Only admins can delete members.' });
+            return;
+        }
+
+        const id = req.params.id as string;
+
+        const member = await prisma.member.findUnique({ where: { id } });
+
+        if (!member) {
+            res.status(404).json({ error: 'Member not found.' });
+            return;
+        }
+
+        // Ensure the member belongs to the requesting admin's network
+        if (member.admin_id !== req.user!.id) {
+            res.status(403).json({ error: 'Access denied: This member is not in your network.' });
+            return;
+        }
+
+        // Use a transaction to safely delete related records then the member
+        await prisma.$transaction(async (tx) => {
+            // Detach children from this member so they aren't cascade-deleted
+            await tx.member.updateMany({
+                where: { parent_id: id },
+                data: { parent_id: null }
+            });
+
+            // Delete commissions tied to orders of this member first
+            const memberOrders = await tx.order.findMany({
+                where: { member_id: id },
+                select: { id: true }
+            });
+            const orderIds = memberOrders.map(o => o.id);
+            if (orderIds.length > 0) {
+                await tx.commission.deleteMany({ where: { related_order_id: { in: orderIds } } });
+            }
+
+            // Delete commissions where this member is the recipient
+            await tx.commission.deleteMany({ where: { member_id: id } });
+
+            // Delete member's orders
+            await tx.order.deleteMany({ where: { member_id: id } });
+
+            // Delete invitations linked to this member
+            await tx.invitation.deleteMany({ where: { parent_id: id } });
+
+            // Finally delete the member
+            await tx.member.delete({ where: { id } });
+        });
+
+        res.status(200).json({ message: 'Member deleted successfully.' });
+    } catch (error) {
+        console.error('Delete member error', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+};
+
 export const getMembers = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
-        const { search, sortBy = 'created_at', order = 'desc', page = '1', limit = '10' } = req.query;
+        const search = req.query.search as string | undefined;
+        const sortBy = (req.query.sortBy as string) || 'created_at';
+        const order = (req.query.order as string) || 'desc';
+        const page = (req.query.page as string) || '1';
+        const limit = (req.query.limit as string) || '10';
 
         const pageNumber = parseInt(page as string, 10) || 1;
         const limitNumber = parseInt(limit as string, 10) || 10;
